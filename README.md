@@ -11,7 +11,7 @@ ESP32-GamePad-BT-Bridge is a project that transforms an ESP32 into a gateway to 
 
 ## Required Hardware
 - An ESP32(DevKit or other ESP32-S3/ESP32-H2 based board)
-- USB OTG cable to connect the controller to the ESP32
+- USB Connector to connect the controller to the ESP32
 - Compatible USB game controller
 - 5V power supply for the  ESP32-S3/ESP32-H2
 - A USB HOST Extension for the ESP32-H2
