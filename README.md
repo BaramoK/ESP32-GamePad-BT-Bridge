@@ -27,6 +27,3 @@ git clone https://github.com/your-name/ESP32-GamePad-BT-Bridge.git
 
 # Navigate to the project directory
 cd ESP32-GamePad-BT-Bridge
-
-# If you use PlatformIO
-platformio run
