@@ -39,14 +39,14 @@ enum {
     BUTTON_COUNT       // Total count
 };
 
-// Controller type enumeration
+// Enumeration for controller types
 enum ControllerType {
-    CONTROLLER_NONE,
-    CONTROLLER_XBOX360,
-    CONTROLLER_XBOXONE,
-    CONTROLLER_XBOXSERIES,
-    CONTROLLER_PS3,
-    CONTROLLER_PS4
+    CONTROLLER_NONE,      // No controller connected
+    CONTROLLER_XBOX360,   // Xbox 360 controller
+    CONTROLLER_XBOXONE,   // Xbox One controller
+    CONTROLLER_XBOXSERIES,// Xbox Series controller
+    CONTROLLER_PS3,       // PlayStation 3 controller
+    CONTROLLER_PS4        // PlayStation 4 controller
 };
 
 // Objects for USB communication and controller management
@@ -264,6 +264,7 @@ void readPS4Input() {
 
     checkSpecialButtonHold();
 }
+
 // Transmits controller data via Bluetooth
 inline void sendControllerData() {
     if (isConnected && bleGamepad.isConnected()) {
