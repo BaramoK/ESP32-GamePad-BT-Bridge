@@ -2,227 +2,373 @@
 #include <Usb.h>
 #include <USBHub.h>
 #include <XBOXRECV.h>
+#include <XBOXONE.h>
+#include <PS3USB.h>
+#include <PS4USB.h>
 #include <BleGamepad.h>
-#include <usb/usb_host.h>
 #include <BLEDevice.h>
 
-// Énumération des boutons de la manette Xbox 360
-// Permet de mapper les boutons à des indices pour accéder facilement à leur état
+// Board type definition
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    #define IS_ESP32S3
+#elif defined(CONFIG_IDF_TARGET_ESP32H2)
+    #define IS_ESP32H2
+#else
+    #error "This code requires either an ESP32-S3 or ESP32-H2"
+#endif
+
+// Controller button enumeration
 enum {
-    BUTTON_NONE = 0,   // Valeur pour aucun bouton pressé
-    BUTTON_A,          // Bouton A (action principale)
-    BUTTON_B,          // Bouton B (action secondaire/annulation)
-    BUTTON_X,          // Bouton X (action alternative)
-    BUTTON_Y,          // Bouton Y (action alternative secondaire)
-    BUTTON_LB,         // Left Bumper - Bouton supérieur gauche
-    BUTTON_RB,         // Right Bumper - Bouton supérieur droit
-    BUTTON_LS,         // Left Stick - Pression sur le stick gauche
-    BUTTON_RS,         // Right Stick - Pression sur le stick droit
-    BUTTON_START,      // Bouton Start/Menu
-    BUTTON_SELECT,     // Bouton Select/Back/View
-    BUTTON_XBOX,       // Bouton Xbox central/Guide
-    BUTTON_UP,         // D-pad direction haut
-    BUTTON_DOWN,       // D-pad direction bas
-    BUTTON_LEFT,       // D-pad direction gauche
-    BUTTON_RIGHT,      // D-pad direction droite
-    BUTTON_COUNT       // Compteur total pour allocation de mémoire
+    BUTTON_NONE = 0,
+    BUTTON_A,          // Xbox A / PS Cross
+    BUTTON_B,          // Xbox B / PS Circle
+    BUTTON_X,          // Xbox X / PS Square
+    BUTTON_Y,          // Xbox Y / PS Triangle
+    BUTTON_LB,         // Xbox LB / PS L1
+    BUTTON_RB,         // Xbox RB / PS R1
+    BUTTON_LS,         // Xbox LS / PS L3
+    BUTTON_RS,         // Xbox RS / PS R3
+    BUTTON_START,      // Xbox Start / PS Options/Start
+    BUTTON_SELECT,     // Xbox Select / PS Share/Select
+    BUTTON_XBOX,       // Xbox Guide / PS Home/PS
+    BUTTON_UP,         // D-pad up
+    BUTTON_DOWN,       // D-pad down
+    BUTTON_LEFT,       // D-pad left
+    BUTTON_RIGHT,      // D-pad right
+    BUTTON_TOUCHPAD,   // PS4 TouchPad
+    BUTTON_COUNT       // Total count
 };
 
-// Objets pour la communication USB et la gestion des manettes
-USB Usb;                  // Contrôleur principal USB pour communiquer avec le shield
-USBHub Hub(&Usb);         // Gestionnaire de hub USB pour augmenter le nombre de ports
-XBOXRECV Xbox(&Usb);      // Récepteur sans fil pour manettes Xbox 360
+// Controller type enumeration
+enum ControllerType {
+    CONTROLLER_NONE,
+    CONTROLLER_XBOX360,
+    CONTROLLER_XBOXONE,
+    CONTROLLER_XBOXSERIES,
+    CONTROLLER_PS3,
+    CONTROLLER_PS4
+};
 
-// Configuration pour le périphérique Bluetooth émulant une manette
-BleGamepadConfiguration bleConfig;  // Configuration personnalisée pour le périphérique BLE
-BleGamepad bleGamepad("ESP32-BLE-Gamepad", "ESP32", 100);  // Nom, fabricant et % batterie
+// Objects for USB communication and controller management
+USB Usb;
+USBHub Hub(&Usb);
+XBOXRECV Xbox360(&Usb);
+XBOXONE XboxOne(&Usb);
+PS3USB PS3(&Usb);
+PS4USB PS4(&Usb);
 
-// Variables d'état pour la gestion de l'appairage Bluetooth
-bool isPairing = false;               // Indicateur si mode appairage actif
-bool isConnected = false;             // Indicateur si un appareil est connecté
-unsigned long pairingStartTime = 0;   // Horodatage du début de l'appairage
-const unsigned long PAIRING_TIMEOUT = 60000; // Temps max d'appairage (1 min)
+// Configuration for the Bluetooth peripheral emulating a controller
+BleGamepadConfiguration bleConfig;
+BleGamepad bleGamepad("ESP32-BLE-Gamepad", "ESP32", 100);
 
-// Structure regroupant toutes les données d'état de la manette Xbox
+// Variables for Bluetooth pairing management
+bool isPairing = false;
+bool isConnected = false;
+unsigned long pairingStartTime = 0;
+const unsigned long PAIRING_TIMEOUT = 60000; // 1 min
+const unsigned long BUTTON_HOLD_TIME = 3000; // 3 seconds to activate pairing
+
+// Pin definitions for USB Host Mini on ESP32-H2
+#ifdef IS_ESP32H2
+    #define USB_HOST_MINI_INT_PIN 9
+    #define USB_HOST_MINI_SS_PIN  10
+    #define USB_HOST_MINI_RESET_PIN 11
+#endif
+
+// Structure for controller state data
 typedef struct {
-    int16_t leftX;        // Position horizontale du joystick gauche (-32768 à 32767)
-    int16_t leftY;        // Position verticale du joystick gauche (-32768 à 32767)
-    int16_t rightX;       // Position horizontale du joystick droit (-32768 à 32767)
-    int16_t rightY;       // Position verticale du joystick droit (-32768 à 32767)
-    uint8_t leftTrigger;  // Valeur analogique de la gâchette gauche (0-255)
-    uint8_t rightTrigger; // Valeur analogique de la gâchette droite (0-255)
-    bool buttons[BUTTON_COUNT]; // Tableau des états de chaque bouton (true=pressé)
-} XboxController;
+    int16_t leftX;
+    int16_t leftY;
+    int16_t rightX;
+    int16_t rightY;
+    uint8_t leftTrigger;
+    uint8_t rightTrigger;
+    bool buttons[BUTTON_COUNT];
+    ControllerType type;
+} Controller;
 
-XboxController controller; // Instance globale stockant l'état actuel de la manette
+Controller controller;
+unsigned long specialButtonPressTime = 0;
 
-// Classe de gestion des événements de connexion/déconnexion Bluetooth
+// Class for managing Bluetooth connection/disconnection events
 class BleGamepadCallbacks : public BLEServerCallbacks {
-    // Méthode appelée quand un appareil se connecte au ESP32
     void onConnect(BLEServer* server) {
         isConnected = true;
         isPairing = false;
         Serial.println("Bluetooth device connected!");
     }
 
-    // Méthode appelée quand un appareil se déconnecte du ESP32
     void onDisconnect(BLEServer* server) {
         isConnected = false;
         Serial.println("Bluetooth device disconnected!");
-        // Redémarrer l'advertising pour permettre une nouvelle connexion
         server->startAdvertising();
     }
 };
 
-// Active le mode d'appairage Bluetooth pour permettre les nouvelles connexions
+// Activates Bluetooth pairing mode
 void startPairingMode() {
     if (!isPairing) {
         isPairing = true;
         pairingStartTime = millis();
 
-        // Configuration du serveur BLE avec les callbacks
         BLEDevice::init("ESP32-BLE-Gamepad");
         BLEServer *pServer = BLEDevice::createServer();
         pServer->setCallbacks(new BleGamepadCallbacks());
 
-        Serial.println("Mode appairage Bluetooth activé pour 1 minute");
-        // Démarre l'advertising BLE pour être visible
+        Serial.println("Bluetooth pairing mode activated for 1 minute");
         BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
         pAdvertising->start();
     }
 }
 
-// Vérifie si le temps d'appairage est dépassé pour arrêter le mode appairage
-void checkPairingTimeout() {
+// Checks if pairing timeout has been reached
+inline void checkPairingTimeout() {
     if (isPairing && (millis() - pairingStartTime > PAIRING_TIMEOUT)) {
         isPairing = false;
         if (!isConnected) {
-            Serial.println("Timeout d'appairage atteint. Mode appairage désactivé.");
+            Serial.println("Pairing timeout reached. Pairing mode deactivated.");
             BLEDevice::deinit(true);
         }
     }
 }
 
-// Lit toutes les entrées de la manette Xbox et met à jour la structure controller
-void readControllerInput() {
-    // Lecture des positions des joysticks
-    controller.leftX = Xbox.getAnalogHat(LeftHatX);       // Axe X du joystick gauche
-    controller.leftY = Xbox.getAnalogHat(LeftHatY);       // Axe Y du joystick gauche
-    controller.rightX = Xbox.getAnalogHat(RightHatX);     // Axe X du joystick droit
-    controller.rightY = Xbox.getAnalogHat(RightHatY);     // Axe Y du joystick droit
-
-    // Lecture des gâchettes analogiques
-    controller.leftTrigger = Xbox.getAnalogButton(LT);    // Gâchette gauche (LT)
-    controller.rightTrigger = Xbox.getAnalogButton(RT);   // Gâchette droite (RT)
-
-    // Lecture de l'état de tous les boutons
-    controller.buttons[BUTTON_A] = Xbox.getButtonPress(A);
-    controller.buttons[BUTTON_B] = Xbox.getButtonPress(B);
-    controller.buttons[BUTTON_X] = Xbox.getButtonPress(X);
-    controller.buttons[BUTTON_Y] = Xbox.getButtonPress(Y);
-    controller.buttons[BUTTON_LB] = Xbox.getButtonPress(LB);
-    controller.buttons[BUTTON_RB] = Xbox.getButtonPress(RB);
-    controller.buttons[BUTTON_LS] = Xbox.getButtonPress(LS);
-    controller.buttons[BUTTON_RS] = Xbox.getButtonPress(RS);
-    controller.buttons[BUTTON_START] = Xbox.getButtonPress(START);
-    controller.buttons[BUTTON_SELECT] = Xbox.getButtonPress(BACK);
-    controller.buttons[BUTTON_XBOX] = Xbox.getButtonPress(GUIDE);
-    controller.buttons[BUTTON_UP] = Xbox.getButtonPress(UP);
-    controller.buttons[BUTTON_DOWN] = Xbox.getButtonPress(DOWN);
-    controller.buttons[BUTTON_LEFT] = Xbox.getButtonPress(LEFT);
-    controller.buttons[BUTTON_RIGHT] = Xbox.getButtonPress(RIGHT);
-
-    // Détection de la pression prolongée sur le bouton Xbox/Guide pour l'appairage
-    static unsigned long guideButtonPressTime = 0;  // Heure à laquelle le bouton a été pressé
+// Checks if the special button is held for pairing
+inline void checkSpecialButtonHold() {
     if (controller.buttons[BUTTON_XBOX]) {
-        if (guideButtonPressTime == 0) {
-            guideButtonPressTime = millis();  // Enregistrer le moment où le bouton est pressé
-        } else if (millis() - guideButtonPressTime > 3000) {  // 3 secondes de pression
-            startPairingMode();  // Activer le mode appairage
-            guideButtonPressTime = 0;  // Réinitialiser le compteur
-        }
+        if (specialButtonPressTime == 0) {
+            specialButtonPressTime = millis();
+        } else if (millis() - specialButtonPressTime > BUTTON_HOLD_TIME) {
+    startPairingMode();
+            specialButtonPressTime = 0;
+}
     } else {
-        guideButtonPressTime = 0;  // Réinitialiser si le bouton est relâché
+        specialButtonPressTime = 0;
     }
 }
 
-// Transmet les données de la manette Xbox via Bluetooth
-void sendControllerData() {
+// Reads inputs from Xbox 360 controller
+void readXbox360Input() {
+    controller.type = CONTROLLER_XBOX360;
+    controller.leftX = Xbox360.getAnalogHat(LeftHatX);
+    controller.leftY = Xbox360.getAnalogHat(LeftHatY);
+    controller.rightX = Xbox360.getAnalogHat(RightHatX);
+    controller.rightY = Xbox360.getAnalogHat(RightHatY);
+    controller.leftTrigger = Xbox360.getAnalogButton(LT);
+    controller.rightTrigger = Xbox360.getAnalogButton(RT);
+
+    controller.buttons[BUTTON_A] = Xbox360.getButtonPress(A);
+    controller.buttons[BUTTON_B] = Xbox360.getButtonPress(B);
+    controller.buttons[BUTTON_X] = Xbox360.getButtonPress(X);
+    controller.buttons[BUTTON_Y] = Xbox360.getButtonPress(Y);
+    controller.buttons[BUTTON_LB] = Xbox360.getButtonPress(LB);
+    controller.buttons[BUTTON_RB] = Xbox360.getButtonPress(RB);
+    controller.buttons[BUTTON_LS] = Xbox360.getButtonPress(LS);
+    controller.buttons[BUTTON_RS] = Xbox360.getButtonPress(RS);
+    controller.buttons[BUTTON_START] = Xbox360.getButtonPress(START);
+    controller.buttons[BUTTON_SELECT] = Xbox360.getButtonPress(BACK);
+    controller.buttons[BUTTON_XBOX] = Xbox360.getButtonPress(GUIDE);
+    controller.buttons[BUTTON_UP] = Xbox360.getButtonPress(UP);
+    controller.buttons[BUTTON_DOWN] = Xbox360.getButtonPress(DOWN);
+    controller.buttons[BUTTON_LEFT] = Xbox360.getButtonPress(LEFT);
+    controller.buttons[BUTTON_RIGHT] = Xbox360.getButtonPress(RIGHT);
+    controller.buttons[BUTTON_TOUCHPAD] = false;
+
+    checkSpecialButtonHold();
+}
+
+// Reads inputs from Xbox One and Series controllers
+void readXboxOneInput() {
+    controller.type = XboxOne.isXboxSeries() ? CONTROLLER_XBOXSERIES : CONTROLLER_XBOXONE;
+    controller.leftX = XboxOne.getAnalogHat(LeftHatX);
+    controller.leftY = XboxOne.getAnalogHat(LeftHatY);
+    controller.rightX = XboxOne.getAnalogHat(RightHatX);
+    controller.rightY = XboxOne.getAnalogHat(RightHatY);
+    controller.leftTrigger = XboxOne.getAnalogButton(LT);
+    controller.rightTrigger = XboxOne.getAnalogButton(RT);
+    controller.buttons[BUTTON_A] = XboxOne.getButtonPress(A);
+    controller.buttons[BUTTON_B] = XboxOne.getButtonPress(B);
+    controller.buttons[BUTTON_X] = XboxOne.getButtonPress(X);
+    controller.buttons[BUTTON_Y] = XboxOne.getButtonPress(Y);
+    controller.buttons[BUTTON_LB] = XboxOne.getButtonPress(LB);
+    controller.buttons[BUTTON_RB] = XboxOne.getButtonPress(RB);
+    controller.buttons[BUTTON_LS] = XboxOne.getButtonPress(LS);
+    controller.buttons[BUTTON_RS] = XboxOne.getButtonPress(RS);
+    controller.buttons[BUTTON_START] = XboxOne.getButtonPress(START);
+    controller.buttons[BUTTON_SELECT] = XboxOne.getButtonPress(BACK);
+    controller.buttons[BUTTON_XBOX] = XboxOne.getButtonPress(XBOX);
+    controller.buttons[BUTTON_UP] = XboxOne.getButtonPress(UP);
+    controller.buttons[BUTTON_DOWN] = XboxOne.getButtonPress(DOWN);
+    controller.buttons[BUTTON_LEFT] = XboxOne.getButtonPress(LEFT);
+    controller.buttons[BUTTON_RIGHT] = XboxOne.getButtonPress(RIGHT);
+    controller.buttons[BUTTON_TOUCHPAD] = XboxOne.getButtonPress(SHARE);
+
+    checkSpecialButtonHold();
+}
+
+// Reads inputs from PS3 controller
+void readPS3Input() {
+    controller.type = CONTROLLER_PS3;
+    controller.leftX = PS3.getAnalogHat(LeftHatX) * 256 - 32768;
+    controller.leftY = PS3.getAnalogHat(LeftHatY) * 256 - 32768;
+    controller.rightX = PS3.getAnalogHat(RightHatX) * 256 - 32768;
+    controller.rightY = PS3.getAnalogHat(RightHatY) * 256 - 32768;
+    controller.leftTrigger = PS3.getAnalogButton(L2);
+    controller.rightTrigger = PS3.getAnalogButton(R2);
+
+    controller.buttons[BUTTON_A] = PS3.getButtonPress(CROSS);
+    controller.buttons[BUTTON_B] = PS3.getButtonPress(CIRCLE);
+    controller.buttons[BUTTON_X] = PS3.getButtonPress(SQUARE);
+    controller.buttons[BUTTON_Y] = PS3.getButtonPress(TRIANGLE);
+    controller.buttons[BUTTON_LB] = PS3.getButtonPress(L1);
+    controller.buttons[BUTTON_RB] = PS3.getButtonPress(R1);
+    controller.buttons[BUTTON_LS] = PS3.getButtonPress(L3);
+    controller.buttons[BUTTON_RS] = PS3.getButtonPress(R3);
+    controller.buttons[BUTTON_START] = PS3.getButtonPress(START);
+    controller.buttons[BUTTON_SELECT] = PS3.getButtonPress(SELECT);
+    controller.buttons[BUTTON_XBOX] = PS3.getButtonPress(PS);
+    controller.buttons[BUTTON_UP] = PS3.getButtonPress(UP);
+    controller.buttons[BUTTON_DOWN] = PS3.getButtonPress(DOWN);
+    controller.buttons[BUTTON_LEFT] = PS3.getButtonPress(LEFT);
+    controller.buttons[BUTTON_RIGHT] = PS3.getButtonPress(RIGHT);
+    controller.buttons[BUTTON_TOUCHPAD] = false;
+
+    checkSpecialButtonHold();
+}
+
+// Reads inputs from PS4 controller
+void readPS4Input() {
+    controller.type = CONTROLLER_PS4;
+    controller.leftX = PS4.getAnalogHat(LeftHatX) * 256 - 32768;
+    controller.leftY = PS4.getAnalogHat(LeftHatY) * 256 - 32768;
+    controller.rightX = PS4.getAnalogHat(RightHatX) * 256 - 32768;
+    controller.rightY = PS4.getAnalogHat(RightHatY) * 256 - 32768;
+    controller.leftTrigger = PS4.getAnalogButton(L2);
+    controller.rightTrigger = PS4.getAnalogButton(R2);
+
+    controller.buttons[BUTTON_A] = PS4.getButtonPress(CROSS);
+    controller.buttons[BUTTON_B] = PS4.getButtonPress(CIRCLE);
+    controller.buttons[BUTTON_X] = PS4.getButtonPress(SQUARE);
+    controller.buttons[BUTTON_Y] = PS4.getButtonPress(TRIANGLE);
+    controller.buttons[BUTTON_LB] = PS4.getButtonPress(L1);
+    controller.buttons[BUTTON_RB] = PS4.getButtonPress(R1);
+    controller.buttons[BUTTON_LS] = PS4.getButtonPress(L3);
+    controller.buttons[BUTTON_RS] = PS4.getButtonPress(R3);
+    controller.buttons[BUTTON_START] = PS4.getButtonPress(OPTIONS);
+    controller.buttons[BUTTON_SELECT] = PS4.getButtonPress(SHARE);
+    controller.buttons[BUTTON_XBOX] = PS4.getButtonPress(PS);
+    controller.buttons[BUTTON_UP] = PS4.getButtonPress(UP);
+    controller.buttons[BUTTON_DOWN] = PS4.getButtonPress(DOWN);
+    controller.buttons[BUTTON_LEFT] = PS4.getButtonPress(LEFT);
+    controller.buttons[BUTTON_RIGHT] = PS4.getButtonPress(RIGHT);
+    controller.buttons[BUTTON_TOUCHPAD] = PS4.getButtonPress(TOUCHPAD);
+
+    checkSpecialButtonHold();
+}
+// Transmits controller data via Bluetooth
+inline void sendControllerData() {
     if (isConnected && bleGamepad.isConnected()) {
-        // Envoyer les positions des joysticks et gâchettes
+        // Normalization and sending of axes
         bleGamepad.setAxes(
-            controller.leftX,       // X gauche
-            controller.leftY,       // Y gauche
-            controller.rightX,      // X droit
-            controller.rightY,      // Y droit
-            controller.leftTrigger, // Gâchette gauche
-            controller.rightTrigger,// Gâchette droite
-            0, 0                    // Axes supplémentaires non utilisés
+            controller.leftX,
+            controller.leftY,
+            controller.rightX,
+            controller.rightY,
+            controller.leftTrigger,
+            controller.rightTrigger,
+            0, 0
         );
 
-        // Mise à jour de l'état des boutons sur le périphérique Bluetooth
+        // Update buttons
         for (int i = BUTTON_A; i < BUTTON_COUNT; i++) {
             if (controller.buttons[i]) {
-                bleGamepad.press(i);    // Active le bouton si pressé
+                bleGamepad.press(i);
             } else {
-                bleGamepad.release(i);  // Désactive le bouton si relâché
+                bleGamepad.release(i);
             }
         }
 
-        // Envoie le rapport d'état complet
+        // Send complete report
         bleGamepad.sendReport();
     }
 }
 
-// Initialisation du système
-void setup() {
-    Serial.begin(115200);  // Communication série pour le débogage
-    Serial.println("Starting ESP32-S3 USB Host");
+// Reads inputs from the active controller
+void readControllerInput() {
+    // Reset button states
+    memset(controller.buttons, 0, sizeof(controller.buttons));
 
-    // Configuration du périphérique Bluetooth émulant une manette
-    bleConfig.setAutoReport(false);  // Désactive les rapports automatiques
-    bleConfig.setControllerType(CONTROLLER_TYPE_GAMEPAD);  // Type: manette de jeu
-    bleConfig.setButtonCount(BUTTON_COUNT);  // Nombre de boutons disponibles
-    bleConfig.setWhichAxes(true, true, true, true, true, true, false, false);  // Axes actifs
-    bleConfig.setAxesMin(0x0000);  // Valeur minimale des axes
-    bleConfig.setAxesMax(0x7FFF);  // Valeur maximale des axes
-    bleGamepad.begin(&bleConfig);  // Initialisation avec la configuration
-    // Configuration de l'hôte USB pour l'ESP32-S3
-    usb_host_config_t host_config = {
-        .skip_phy_setup = false,            // Configuration physique requise
-        .intr_flags = ESP_INTR_FLAG_LEVEL1, // Niveau de priorité des interruptions
-    };
-
-    // Installation du pilote USB Host
-    if (usb_host_install(&host_config) != ESP_OK) {
-        Serial.println("ESP32-S3 USB Host initialization failed");
-        while (1); // Boucle infinie en cas d'échec
+    if (Xbox360.Xbox360Connected[0]) {
+        readXbox360Input();
+    } else if (XboxOne.connected()) {
+        readXboxOneInput();
+    } else if (PS3.connected()) {
+        readPS3Input();
+    } else if (PS4.connected()) {
+        readPS4Input();
+    } else {
+        controller.type = CONTROLLER_NONE;
+        return;
     }
-
-    // Initialisation du shield USB Host
-    if (Usb.Init() == -1) {
-        Serial.println("USB Host Shield did not start");
-        while (1); // Boucle infinie en cas d'échec
-    }
-
-    Serial.println("ESP32-S3 USB Host initialized successfully");
-    Serial.println("Pour lancer l'appairage Bluetooth, maintenez le bouton Xbox/Guide pendant 3 secondes");
-
-    // Activation initiale du mode appairage
-    startPairingMode();
 }
 
-// Boucle principale du programme
-void loop() {
-    Usb.Task();  // Traitement des événements USB
+// System initialization
+void setup() {
+    Serial.begin(115200);
 
-    // Vérification du timeout d'appairage
+    #ifdef IS_ESP32S3
+        Serial.println("Initializing ESP32-S3 for USB controllers");
+    #else
+        Serial.println("Initializing ESP32-H2 with USB Host Mini");
+        // Pin configuration for USB Host Mini on ESP32-H2
+        pinMode(USB_HOST_MINI_RESET_PIN, OUTPUT);
+        digitalWrite(USB_HOST_MINI_RESET_PIN, LOW); // Reset USB Host shield
+        delay(100);
+        digitalWrite(USB_HOST_MINI_RESET_PIN, HIGH);
+
+        SPI.begin();
+    #endif
+    // Bluetooth peripheral configuration
+    bleConfig.setAutoReport(false);
+    bleConfig.setControllerType(CONTROLLER_TYPE_GAMEPAD);
+    bleConfig.setButtonCount(BUTTON_COUNT);
+    bleConfig.setWhichAxes(true, true, true, true, true, true, false, false);
+    bleConfig.setAxesMin(0x0000);
+    bleConfig.setAxesMax(0x7FFF);
+    bleGamepad.begin(&bleConfig);
+
+    #ifdef IS_ESP32H2
+        Usb.init();
+        Usb.gpioInit(USB_HOST_MINI_INT_PIN, USB_HOST_MINI_SS_PIN);
+    #endif
+
+    if (Usb.Init() == -1) {
+        Serial.println("USB interface initialization failed");
+        while(1);
+    }
+
+    Serial.println("USB interface successfully initialized");
+    Serial.println("Compatible with Xbox 360, Xbox One, Xbox Series, PS3 and PS4 controllers");
+    Serial.println("To initiate Bluetooth pairing, hold the Xbox/PS button for 3 seconds");
+
+    // Initial activation of pairing mode
+    startPairingMode();
+
+    // Controller structure initialization
+    memset(&controller, 0, sizeof(controller));
+}
+
+// Main program loop
+void loop() {
+    Usb.Task();  // Processing USB events
+
+    // Check pairing timeout
     checkPairingTimeout();
 
-    // Traitement des données de la manette si connectée
-    if (Xbox.Xbox360Connected[0]) {  // Vérifie si la manette #0 est connectée
-        readControllerInput();     // Lecture des entrées
-        sendControllerData();      // Transmission via Bluetooth
-        delay(10);                 // Délai pour stabiliser la communication BLE
+    // Process controller data if connected
+    readControllerInput();
+
+    if (controller.type != CONTROLLER_NONE) {
+        sendControllerData();
+        delay(10);  // Delay to stabilize BLE communication
     }
 }
