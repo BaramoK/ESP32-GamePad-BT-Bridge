@@ -1,9 +1,9 @@
 # ESP32-GamePad-BT-Bridge 
 ## Description
-ESP32-GamePad-BT-Bridge is a project that transforms an ESP32-S3 into a gateway to connect USB game controllers to Bluetooth-compatible devices. This solution allows you to use your favorite wired controllers with wireless devices such as smartphones, tablets, Smart TVs, or game consoles.
+ESP32-GamePad-BT-Bridge is a project that transforms an ESP32 into a gateway to connect USB game controllers to Bluetooth-compatible devices. This solution allows you to use your favorite wired controllers with wireless devices such as smartphones, tablets, Smart TVs, or game consoles.
 
 ## Features
-- Connection of standard USB game controllers to the ESP32-S3
+- Connection of standard USB game controllers to the ESP32
 - Emulation of a Bluetooth HID controller compatible with many devices
 - Low latency for an optimal gaming experience
 - Support for multiple controller protocols (to be specified according to your implementations)
